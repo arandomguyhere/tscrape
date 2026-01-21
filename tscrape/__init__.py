@@ -19,9 +19,11 @@ Features:
 - Channel discovery via forwards (snowballing method)
 - Keyword filtering with regex support
 - Network graph export (GraphML/GEXF)
+- Academic-grade bias tracking (gap detection, deletion tracking)
+- Scrape run manifests for reproducibility
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __author__ = "TScrape"
 
 from .scraper import TelegramScraper
@@ -30,6 +32,7 @@ from .media import MediaDownloader
 from .proxy import ProxyManager, ProxyInfo, ProxyType
 from .discovery import ChannelDiscovery, DiscoveredChannel, ChannelEdge
 from .filters import MessageFilter, FilterMode, FilterResult, KeywordSet
+from .bias import BiasTracker, BiasMetrics, ScrapeRunManifest, MessageStatus
 
 __all__ = [
     "TelegramScraper",
@@ -44,5 +47,9 @@ __all__ = [
     "MessageFilter",
     "FilterMode",
     "FilterResult",
-    "KeywordSet"
+    "KeywordSet",
+    "BiasTracker",
+    "BiasMetrics",
+    "ScrapeRunManifest",
+    "MessageStatus"
 ]

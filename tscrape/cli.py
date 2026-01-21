@@ -914,6 +914,208 @@ def proxy_sources():
     console.print("\n[dim]Use with: tscrape proxy load --source <name>[/dim]")
 
 
+@cli.group()
+def bias():
+    """Bias tracking and data quality commands."""
+    pass
+
+
+@bias.command("metrics")
+@click.argument('channel')
+@click.pass_context
+def bias_metrics(ctx, channel):
+    """
+    Show bias metrics for a scraped channel.
+
+    Displays gap ratio, deletion rate, coverage, and other
+    academic-grade data quality indicators.
+
+    Examples:
+
+        tscrape bias metrics mychannel
+    """
+    config = ctx.obj['config']
+    storage = StorageManager(Path(config.data_dir))
+
+    # Get channel ID from state
+    with storage._get_connection() as conn:
+        row = conn.execute(
+            "SELECT channel_id FROM scrape_state WHERE channel_name = ?",
+            (channel,)
+        ).fetchone()
+
+        if not row:
+            console.print(f"[yellow]No scrape data found for channel: {channel}[/yellow]")
+            return
+
+        channel_id = row['channel_id']
+
+    metrics = storage.get_bias_metrics(channel_id, channel)
+
+    if not metrics:
+        console.print("[yellow]Bias tracking not enabled or no data available[/yellow]")
+        return
+
+    # Display metrics
+    table = Table(title=f"Bias Metrics for {channel}")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+
+    # Coverage
+    table.add_row("Expected Messages", f"{metrics.expected_message_count:,}")
+    table.add_row("Observed Messages", f"{metrics.observed_message_count:,}")
+    table.add_row("Gap Count", f"{metrics.gap_count:,}")
+    table.add_row("Coverage Rate", f"{metrics.coverage_rate:.1%}")
+    table.add_row("Gap Ratio", f"{metrics.gap_ratio:.1%}")
+
+    # Deletions
+    table.add_row("Confirmed Deleted", f"{metrics.confirmed_deleted:,}")
+    table.add_row("Possibly Deleted", f"{metrics.possibly_deleted:,}")
+    table.add_row("Deletion Rate", f"{metrics.deletion_rate:.1%}")
+
+    # Edits
+    table.add_row("Edited Messages", f"{metrics.edited_messages:,}")
+    table.add_row("Edit Rate", f"{metrics.edit_rate:.1%}")
+
+    console.print(table)
+
+    # Show methodology statement
+    console.print(f"\n[bold]Methodology Statement:[/bold]")
+    console.print(Panel(metrics.get_methodology_statement(), border_style="dim"))
+
+
+@bias.command("report")
+@click.argument('channel')
+@click.option('--output', '-o', type=click.Path(), help='Output file path')
+@click.pass_context
+def bias_report(ctx, channel, output):
+    """
+    Export comprehensive bias report for a channel.
+
+    Generates a JSON report with all bias metrics, run history,
+    and methodology statement for academic papers.
+
+    Examples:
+
+        tscrape bias report mychannel
+
+        tscrape bias report mychannel -o my_report.json
+    """
+    config = ctx.obj['config']
+    storage = StorageManager(Path(config.data_dir))
+
+    # Get channel ID
+    with storage._get_connection() as conn:
+        row = conn.execute(
+            "SELECT channel_id FROM scrape_state WHERE channel_name = ?",
+            (channel,)
+        ).fetchone()
+
+        if not row:
+            console.print(f"[yellow]No scrape data found for channel: {channel}[/yellow]")
+            return
+
+        channel_id = row['channel_id']
+
+    output_path = Path(output) if output else None
+    report_path = storage.export_bias_report(channel_id, channel, output_path)
+
+    if report_path:
+        console.print(f"[green]Bias report exported to: {report_path}[/green]")
+    else:
+        console.print("[yellow]Bias tracking not enabled or no data available[/yellow]")
+
+
+@bias.command("history")
+@click.option('--limit', '-n', type=int, default=10, help='Number of runs to show')
+@click.pass_context
+def bias_history(ctx, limit):
+    """
+    Show scrape run history for reproducibility tracking.
+
+    Displays recent scrape runs with their manifests.
+
+    Examples:
+
+        tscrape bias history
+
+        tscrape bias history --limit 5
+    """
+    config = ctx.obj['config']
+    storage = StorageManager(Path(config.data_dir))
+
+    history = storage.get_scrape_history(limit)
+
+    if not history:
+        console.print("[yellow]No scrape history found[/yellow]")
+        return
+
+    table = Table(title="Scrape Run History")
+    table.add_column("Run ID", style="cyan")
+    table.add_column("Date", style="green")
+    table.add_column("Channels", style="yellow")
+    table.add_column("Messages", style="magenta", justify="right")
+    table.add_column("Errors", style="red", justify="right")
+    table.add_column("FloodWaits", style="dim", justify="right")
+
+    for run in history:
+        stats = run.get('runtime_stats', {})
+        start = run.get('start_time_utc', '')[:10] if run.get('start_time_utc') else '-'
+
+        table.add_row(
+            run.get('run_id', '')[:8],
+            start,
+            ', '.join(run.get('channels', []))[:30],
+            str(stats.get('messages_collected', 0)),
+            str(stats.get('errors_encountered', 0)),
+            str(stats.get('flood_waits', 0))
+        )
+
+    console.print(table)
+
+
+@bias.command("statement")
+@click.argument('channel')
+@click.pass_context
+def bias_statement(ctx, channel):
+    """
+    Generate methodology statement for academic papers.
+
+    Outputs a formatted statement suitable for inclusion in
+    the methodology section of research publications.
+
+    Examples:
+
+        tscrape bias statement mychannel
+    """
+    config = ctx.obj['config']
+    storage = StorageManager(Path(config.data_dir))
+
+    # Get channel ID
+    with storage._get_connection() as conn:
+        row = conn.execute(
+            "SELECT channel_id FROM scrape_state WHERE channel_name = ?",
+            (channel,)
+        ).fetchone()
+
+        if not row:
+            console.print(f"[yellow]No scrape data found for channel: {channel}[/yellow]")
+            return
+
+        channel_id = row['channel_id']
+
+    statement = storage.get_methodology_statement(channel_id, channel)
+
+    if statement:
+        console.print(Panel(
+            statement,
+            title="Methodology Statement",
+            subtitle="Copy to your paper's methodology section"
+        ))
+    else:
+        console.print("[yellow]Bias tracking not enabled or no data available[/yellow]")
+
+
 def main():
     """Entry point."""
     cli(obj={})

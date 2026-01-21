@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tscrape"
-version = "1.1.0"
-description = "Modern Telegram Channel Scraper with proxy rotation (2026)"
+version = "1.2.0"
+description = "Modern Telegram Channel Scraper with discovery, filtering, and proxy rotation (2026)"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
 authors = [
     {name = "TScrape"}
 ]
-keywords = ["telegram", "scraper", "telethon", "osint", "data-collection", "proxy", "socks5"]
+keywords = ["telegram", "scraper", "telethon", "osint", "data-collection", "proxy", "socks5", "network-analysis", "cti", "threat-intelligence"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

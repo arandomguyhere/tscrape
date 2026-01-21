@@ -2,6 +2,7 @@
 Main Telegram Scraper Module
 
 Uses Telethon MTProto API for reliable, full-featured scraping.
+Supports proxy rotation via Proxy-Hound and SOCKS5-Scanner.
 """
 
 import asyncio
@@ -26,6 +27,7 @@ from .storage import StorageManager
 from .media import MediaDownloader
 from .models import ScrapedMessage, ChannelInfo, ScrapeState
 from .config import Config
+from .proxy import ProxyManager, ProxyInfo, ProxyType
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,7 @@ class TelegramScraper:
     - Rich metadata capture (reactions, views, forwards)
     - Parallel media downloads
     - Multiple export formats (Parquet, JSON, CSV)
+    - Proxy rotation support (Proxy-Hound, SOCKS5-Scanner)
     """
 
     def __init__(
@@ -48,13 +51,15 @@ class TelegramScraper:
         api_hash: str,
         session_name: str = "tscrape_session",
         data_dir: str = "./data",
-        config: Optional[Config] = None
+        config: Optional[Config] = None,
+        proxy_manager: Optional[ProxyManager] = None
     ):
         self.api_id = api_id
         self.api_hash = api_hash
         self.session_name = session_name
         self.data_dir = Path(data_dir)
         self.config = config or Config()
+        self.proxy_manager = proxy_manager
 
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -65,24 +70,65 @@ class TelegramScraper:
         self._flood_wait_count = 0
         self._messages_scraped = 0
         self._is_running = False
+        self._current_proxy: Optional[ProxyInfo] = None
+        self._proxy_rotation_on_flood = True
 
-    async def connect(self) -> None:
-        """Initialize and connect the Telegram client."""
+    async def connect(self, proxy: Optional[ProxyInfo] = None) -> None:
+        """
+        Initialize and connect the Telegram client.
+
+        Args:
+            proxy: Optional proxy to use for connection
+        """
         session_path = self.data_dir / self.session_name
 
-        self.client = TelegramClient(
-            str(session_path),
-            self.api_id,
-            self.api_hash,
-            system_version="4.16.30-vxTSCRAPE",
-            device_model="TScrape Bot",
-            app_version="1.0.0"
-        )
+        # Get proxy from manager if not provided
+        if proxy is None and self.proxy_manager:
+            proxy = await self.proxy_manager.get_proxy()
+            if proxy:
+                logger.info(f"Using proxy: {proxy.host}:{proxy.port} ({proxy.proxy_type.value})")
 
-        await self.client.start()
+        self._current_proxy = proxy
 
-        me = await self.client.get_me()
-        logger.info(f"Connected as: {me.username or me.phone}")
+        # Build client with or without proxy
+        client_kwargs = {
+            "session": str(session_path),
+            "api_id": self.api_id,
+            "api_hash": self.api_hash,
+            "system_version": "4.16.30-vxTSCRAPE",
+            "device_model": "TScrape Bot",
+            "app_version": "1.0.0"
+        }
+
+        if proxy:
+            client_kwargs["proxy"] = proxy.to_telethon_proxy()
+
+        self.client = TelegramClient(**client_kwargs)
+
+        try:
+            await self.client.start()
+
+            me = await self.client.get_me()
+            logger.info(f"Connected as: {me.username or me.phone}")
+
+            # Report proxy success
+            if proxy and self.proxy_manager:
+                self.proxy_manager.report_success(proxy)
+
+        except Exception as e:
+            # Report proxy failure and retry with another
+            if proxy and self.proxy_manager:
+                self.proxy_manager.report_failure(proxy, str(e))
+                logger.warning(f"Proxy failed: {proxy.host}:{proxy.port} - {e}")
+
+                # Try another proxy
+                new_proxy = await self.proxy_manager.get_proxy()
+                if new_proxy and new_proxy != proxy:
+                    logger.info(f"Retrying with proxy: {new_proxy.host}:{new_proxy.port}")
+                    await self.connect(new_proxy)
+                    return
+
+            raise
 
         self.storage = StorageManager(self.data_dir)
         self.media_downloader = MediaDownloader(
@@ -336,7 +382,7 @@ class TelegramScraper:
         logger.debug(f"Saved batch of {len(batch)} messages, checkpoint: {oldest_id}")
 
     async def _handle_flood_wait(self, error: FloodWaitError) -> None:
-        """Handle Telegram's FloodWait with exponential backoff."""
+        """Handle Telegram's FloodWait with exponential backoff and optional proxy rotation."""
         wait_time = error.seconds
         self._flood_wait_count += 1
 
@@ -349,7 +395,50 @@ class TelegramScraper:
             f"(base: {wait_time}s, backoff: {extra_wait}s, count: {self._flood_wait_count})"
         )
 
+        # Try rotating proxy on repeated flood waits
+        if self._proxy_rotation_on_flood and self.proxy_manager and self._flood_wait_count >= 2:
+            if self._current_proxy:
+                self.proxy_manager.report_failure(self._current_proxy, "FloodWait")
+
+            new_proxy = await self.proxy_manager.get_proxy()
+            if new_proxy and new_proxy != self._current_proxy:
+                logger.info(f"Rotating to new proxy: {new_proxy.host}:{new_proxy.port}")
+                await self._reconnect_with_proxy(new_proxy)
+                # Reduced wait after proxy rotation
+                total_wait = min(total_wait, 30)
+
         await asyncio.sleep(total_wait)
+
+    async def _reconnect_with_proxy(self, proxy: ProxyInfo) -> None:
+        """Reconnect with a new proxy."""
+        try:
+            if self.client:
+                await self.client.disconnect()
+
+            self._current_proxy = proxy
+            session_path = self.data_dir / self.session_name
+
+            self.client = TelegramClient(
+                str(session_path),
+                self.api_id,
+                self.api_hash,
+                system_version="4.16.30-vxTSCRAPE",
+                device_model="TScrape Bot",
+                app_version="1.0.0",
+                proxy=proxy.to_telethon_proxy()
+            )
+
+            await self.client.start()
+            self._flood_wait_count = 0  # Reset flood count on new proxy
+            logger.info(f"Reconnected with proxy: {proxy.host}:{proxy.port}")
+
+            if self.proxy_manager:
+                self.proxy_manager.report_success(proxy)
+
+        except Exception as e:
+            logger.error(f"Failed to reconnect with proxy: {e}")
+            if self.proxy_manager:
+                self.proxy_manager.report_failure(proxy, str(e))
 
     def stop(self) -> None:
         """Signal the scraper to stop gracefully."""
@@ -372,3 +461,19 @@ class TelegramScraper:
                 })
 
         return dialogs
+
+    def get_proxy_stats(self) -> Optional[Dict[str, Any]]:
+        """Get proxy pool statistics."""
+        if self.proxy_manager:
+            stats = self.proxy_manager.get_stats()
+            stats["current_proxy"] = (
+                f"{self._current_proxy.host}:{self._current_proxy.port}"
+                if self._current_proxy else None
+            )
+            return stats
+        return None
+
+    def set_proxy_rotation(self, enabled: bool) -> None:
+        """Enable or disable proxy rotation on FloodWait."""
+        self._proxy_rotation_on_flood = enabled
+        logger.info(f"Proxy rotation on FloodWait: {'enabled' if enabled else 'disabled'}")

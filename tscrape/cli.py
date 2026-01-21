@@ -5,6 +5,7 @@ Provides a user-friendly command-line interface with:
 - Interactive channel selection
 - Progress bars
 - Multiple commands (scrape, export, list, stats)
+- Proxy management (load, test, stats)
 """
 
 import asyncio
@@ -23,6 +24,7 @@ from rich.prompt import Prompt, Confirm
 from .scraper import TelegramScraper
 from .storage import StorageManager
 from .config import Config
+from .proxy import ProxyManager, ProxyType
 
 console = Console()
 
@@ -74,8 +76,11 @@ def cli(ctx, config, data_dir, log_level):
 @click.option('--resume/--no-resume', default=True, help='Resume from checkpoint')
 @click.option('--api-id', type=int, envvar='TELEGRAM_API_ID', help='Telegram API ID')
 @click.option('--api-hash', envvar='TELEGRAM_API_HASH', help='Telegram API Hash')
+@click.option('--proxy/--no-proxy', default=False, help='Use proxy rotation')
+@click.option('--proxy-file', type=click.Path(exists=True), help='Load proxies from file')
+@click.option('--proxy-country', '-pc', multiple=True, help='Filter proxies by country code (e.g., US, DE)')
 @click.pass_context
-def scrape(ctx, channel, limit, media, resume, api_id, api_hash):
+def scrape(ctx, channel, limit, media, resume, api_id, api_hash, proxy, proxy_file, proxy_country):
     """
     Scrape messages from a Telegram channel.
 
@@ -83,9 +88,13 @@ def scrape(ctx, channel, limit, media, resume, api_id, api_hash):
 
     Examples:
 
-        tscrape scrape @duloruv
+        tscrape scrape @durov
 
         tscrape scrape @mychannel --limit 1000 --media
+
+        tscrape scrape @mychannel --proxy
+
+        tscrape scrape @mychannel --proxy --proxy-country US --proxy-country DE
 
         tscrape scrape 1234567890 --no-resume
     """
@@ -109,7 +118,10 @@ def scrape(ctx, channel, limit, media, resume, api_id, api_hash):
         limit=limit,
         download_media=media,
         resume=resume,
-        config=config
+        config=config,
+        use_proxy=proxy,
+        proxy_file=proxy_file,
+        proxy_countries=list(proxy_country) if proxy_country else None
     ))
 
 
@@ -120,7 +132,10 @@ async def _scrape_channel(
     limit: Optional[int],
     download_media: bool,
     resume: bool,
-    config: Config
+    config: Config,
+    use_proxy: bool = False,
+    proxy_file: Optional[str] = None,
+    proxy_countries: Optional[List[str]] = None
 ):
     """Internal async scrape implementation."""
     console.print(Panel.fit(
@@ -128,11 +143,37 @@ async def _scrape_channel(
         subtitle="Press Ctrl+C to stop gracefully"
     ))
 
+    # Setup proxy manager if requested
+    proxy_manager = None
+    if use_proxy:
+        console.print("[cyan]Loading proxies...[/cyan]")
+
+        proxy_manager = ProxyManager(
+            preferred_types=[ProxyType.SOCKS5, ProxyType.SOCKS4],
+            preferred_countries=proxy_countries
+        )
+
+        if proxy_file:
+            count = proxy_manager.load_from_file(Path(proxy_file))
+            console.print(f"[green]Loaded {count} proxies from file[/green]")
+        else:
+            # Load from Proxy-Hound and SOCKS5-Scanner
+            count = await proxy_manager.load_from_sources()
+            console.print(f"[green]Loaded {count} proxies from remote sources[/green]")
+
+        if proxy_manager.available_count == 0:
+            console.print("[yellow]Warning: No proxies available, continuing without proxy[/yellow]")
+            proxy_manager = None
+        else:
+            stats = proxy_manager.get_stats()
+            console.print(f"[dim]Available: {stats['available']} | By type: {stats['by_type']}[/dim]")
+
     async with TelegramScraper(
         api_id=api_id,
         api_hash=api_hash,
         data_dir=config.data_dir,
-        config=config
+        config=config,
+        proxy_manager=proxy_manager
     ) as scraper:
 
         # Get channel info
@@ -186,11 +227,15 @@ async def _scrape_channel(
                 scraper.stop()
 
         # Print summary
-        console.print(Panel.fit(
-            f"[green]Scraped {message_count:,} messages[/green]\n"
-            f"Data saved to: {config.data_dir}/{info.username or info.id}/",
-            title="Complete"
-        ))
+        summary = f"[green]Scraped {message_count:,} messages[/green]\n"
+        summary += f"Data saved to: {config.data_dir}/{info.username or info.id}/"
+
+        # Add proxy stats if used
+        proxy_stats = scraper.get_proxy_stats()
+        if proxy_stats:
+            summary += f"\n[dim]Proxy: {proxy_stats.get('current_proxy', 'N/A')}[/dim]"
+
+        console.print(Panel.fit(summary, title="Complete"))
 
 
 @cli.command()
@@ -330,6 +375,158 @@ def init(ctx):
     console.print(f"\n[green]Configuration saved to: {config_path}[/green]")
     console.print("\nYou can now run:")
     console.print(f"  [cyan]tscrape -c {config_path} scrape @channel[/cyan]")
+
+
+@cli.group()
+def proxy():
+    """Proxy management commands."""
+    pass
+
+
+@proxy.command("load")
+@click.option('--source', '-s', multiple=True,
+              help='Proxy source (proxy_hound_socks5, socks5_scanner, etc.)')
+@click.option('--file', '-f', type=click.Path(exists=True), help='Load from local file')
+@click.option('--test/--no-test', default=False, help='Test proxies after loading')
+@click.pass_context
+def proxy_load(ctx, source, file, test):
+    """
+    Load proxies from remote sources or file.
+
+    Sources available:
+    - proxy_hound_socks5, proxy_hound_socks4, proxy_hound_https
+    - socks5_scanner
+
+    Examples:
+
+        tscrape proxy load
+
+        tscrape proxy load --source socks5_scanner --test
+
+        tscrape proxy load --file ./my_proxies.txt
+    """
+    asyncio.run(_proxy_load(list(source) if source else None, file, test))
+
+
+async def _proxy_load(sources: Optional[List[str]], file: Optional[str], test: bool):
+    """Load proxies implementation."""
+    proxy_manager = ProxyManager()
+
+    with console.status("[cyan]Loading proxies..."):
+        if file:
+            count = proxy_manager.load_from_file(Path(file))
+            console.print(f"[green]Loaded {count} proxies from {file}[/green]")
+        else:
+            count = await proxy_manager.load_from_sources(sources)
+            console.print(f"[green]Loaded {count} proxies from remote sources[/green]")
+
+    # Show stats
+    stats = proxy_manager.get_stats()
+
+    table = Table(title="Proxy Pool Statistics")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+
+    table.add_row("Total Proxies", str(stats['total']))
+    table.add_row("Available", str(stats['available']))
+
+    for ptype, pcount in stats['by_type'].items():
+        table.add_row(f"  {ptype.upper()}", str(pcount))
+
+    if stats['by_country']:
+        top_countries = sorted(stats['by_country'].items(), key=lambda x: x[1], reverse=True)[:5]
+        table.add_row("Top Countries", ", ".join(f"{c}:{n}" for c, n in top_countries))
+
+    console.print(table)
+
+    # Test if requested
+    if test and proxy_manager.count > 0:
+        console.print("\n[cyan]Testing proxies...[/cyan]")
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=console
+        ) as progress:
+            task = progress.add_task("Testing...", total=proxy_manager.count)
+
+            results = await proxy_manager.test_all_proxies(max_concurrent=50)
+
+            progress.update(task, completed=proxy_manager.count)
+
+        console.print(f"\n[green]Working: {results['working']}[/green] | "
+                     f"[red]Dead: {results['dead']}[/red] | "
+                     f"Success rate: {results['success_rate']:.1%}")
+
+
+@proxy.command("test")
+@click.option('--file', '-f', type=click.Path(exists=True), required=True, help='Proxy file to test')
+@click.option('--concurrent', '-c', type=int, default=50, help='Concurrent connections')
+@click.option('--output', '-o', type=click.Path(), help='Save working proxies to file')
+@click.pass_context
+def proxy_test(ctx, file, concurrent, output):
+    """
+    Test proxies from a file.
+
+    Examples:
+
+        tscrape proxy test -f proxies.txt
+
+        tscrape proxy test -f proxies.txt -o working.txt -c 100
+    """
+    asyncio.run(_proxy_test(file, concurrent, output))
+
+
+async def _proxy_test(file: str, concurrent: int, output: Optional[str]):
+    """Test proxies implementation."""
+    proxy_manager = ProxyManager()
+
+    console.print(f"[cyan]Loading proxies from {file}...[/cyan]")
+    count = proxy_manager.load_from_file(Path(file))
+    console.print(f"[green]Loaded {count} proxies[/green]")
+
+    console.print(f"\n[cyan]Testing with {concurrent} concurrent connections...[/cyan]")
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console
+    ) as progress:
+        task = progress.add_task("Testing proxies...", total=count)
+        results = await proxy_manager.test_all_proxies(max_concurrent=concurrent)
+        progress.update(task, completed=count)
+
+    console.print(f"\n[bold]Results:[/bold]")
+    console.print(f"  [green]Working: {results['working']}[/green]")
+    console.print(f"  [red]Dead: {results['dead']}[/red]")
+    console.print(f"  Success rate: {results['success_rate']:.1%}")
+
+    if output:
+        working = [p for p in proxy_manager._proxies if not p.is_dead]
+        with open(output, 'w') as f:
+            for p in working:
+                f.write(f"{p.host}:{p.port}\n")
+        console.print(f"\n[green]Saved {len(working)} working proxies to {output}[/green]")
+
+
+@proxy.command("sources")
+def proxy_sources():
+    """List available proxy sources."""
+    from .proxy import PROXY_SOURCES
+
+    table = Table(title="Available Proxy Sources")
+    table.add_column("Name", style="cyan")
+    table.add_column("URL", style="dim")
+
+    for name, url in PROXY_SOURCES.items():
+        table.add_row(name, url)
+
+    console.print(table)
+    console.print("\n[dim]Use with: tscrape proxy load --source <name>[/dim]")
 
 
 def main():

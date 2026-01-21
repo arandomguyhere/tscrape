@@ -4,6 +4,7 @@ A high-performance Telegram scraper combining best practices from:
 - [unnohwn/telegram-scraper](https://github.com/unnohwn/telegram-scraper) - Resume support, parallel media
 - [ergoncugler/web-scraping-telegram](https://github.com/ergoncugler/web-scraping-telegram) - Parquet storage, analytics
 - [Telethon](https://github.com/LonamiWebs/Telethon) - FloodWait handling, session management
+- [Proxy-Hound](https://github.com/arandomguyhere/Proxy-Hound) & [SOCKS5-Scanner](https://github.com/arandomguyhere/Tools/tree/main/socks5-scanner) - Proxy rotation
 
 ## Features
 
@@ -17,6 +18,8 @@ A high-performance Telegram scraper combining best practices from:
 | **Rich Metadata** | Views, forwards, reactions, replies |
 | **Multiple Exports** | Parquet, JSON, CSV formats |
 | **Progress Tracking** | Real-time progress bars |
+| **Proxy Rotation** | Auto-load from Proxy-Hound/SOCKS5-Scanner |
+| **Health Tracking** | Auto-skip dead proxies |
 
 ## Installation
 
@@ -125,6 +128,90 @@ tscrape export channelname --format json
 tscrape export channelname --format csv -o /path/to/output.csv
 ```
 
+## Proxy Support
+
+TScrape integrates with [Proxy-Hound](https://github.com/arandomguyhere/Proxy-Hound) and [SOCKS5-Scanner](https://github.com/arandomguyhere/Tools/tree/main/socks5-scanner) for automatic proxy rotation.
+
+### Why Use Proxies?
+
+- **Avoid IP bans** during large scrapes
+- **Bypass rate limits** by rotating IPs on FloodWait
+- **Geographic distribution** for better reliability
+
+### Scraping with Proxies
+
+```bash
+# Enable proxy rotation (auto-loads from Proxy-Hound & SOCKS5-Scanner)
+tscrape scrape @channel --proxy
+
+# Filter by country
+tscrape scrape @channel --proxy --proxy-country US --proxy-country DE
+
+# Use custom proxy file
+tscrape scrape @channel --proxy --proxy-file ./my_proxies.txt
+```
+
+### Proxy Management Commands
+
+```bash
+# Load and view proxy pool statistics
+tscrape proxy load
+
+# Load from specific source
+tscrape proxy load --source socks5_scanner
+
+# Load and test proxies
+tscrape proxy load --test
+
+# Test proxies from file
+tscrape proxy test -f proxies.txt -o working.txt
+
+# List available proxy sources
+tscrape proxy sources
+```
+
+### Proxy Sources
+
+| Source | Description |
+|--------|-------------|
+| `proxy_hound_socks5` | SOCKS5 from Proxy-Hound |
+| `proxy_hound_socks4` | SOCKS4 from Proxy-Hound |
+| `proxy_hound_https` | HTTPS from Proxy-Hound |
+| `socks5_scanner` | SOCKS5 from SOCKS5-Scanner |
+
+### Python API with Proxies
+
+```python
+from tscrape import TelegramScraper, ProxyManager, ProxyType
+
+async def main():
+    # Setup proxy manager
+    proxy_manager = ProxyManager(
+        preferred_types=[ProxyType.SOCKS5],
+        preferred_countries=["US", "DE", "NL"]
+    )
+    await proxy_manager.load_from_sources()
+
+    # Use with scraper
+    async with TelegramScraper(
+        api_id=API_ID,
+        api_hash=API_HASH,
+        proxy_manager=proxy_manager
+    ) as scraper:
+        async for msg in scraper.scrape_channel("@channel"):
+            print(msg.text)
+
+        # Check proxy stats
+        print(scraper.get_proxy_stats())
+```
+
+### How Proxy Rotation Works
+
+1. **On connect**: Selects best proxy from pool (weighted by success rate)
+2. **On FloodWait**: After 2+ FloodWaits, rotates to a new proxy
+3. **On failure**: Marks proxy as failed, tries another
+4. **Dead proxies**: After 3 failures with <20% success rate, proxy is skipped
+
 ## Architecture
 
 ```
@@ -133,6 +220,7 @@ tscrape/
 ├── scraper.py        # Main TelegramScraper class
 ├── storage.py        # Parquet + SQLite storage
 ├── media.py          # Parallel media downloader
+├── proxy.py          # Proxy manager with rotation
 ├── models.py         # Data models (ScrapedMessage, etc.)
 ├── config.py         # Configuration management
 └── cli.py            # Command-line interface
@@ -244,3 +332,7 @@ Built on the excellent [Telethon](https://github.com/LonamiWebs/Telethon) librar
 Inspired by:
 - [unnohwn/telegram-scraper](https://github.com/unnohwn/telegram-scraper)
 - [ergoncugler/web-scraping-telegram](https://github.com/ergoncugler/web-scraping-telegram)
+
+Proxy support powered by:
+- [Proxy-Hound](https://github.com/arandomguyhere/Proxy-Hound)
+- [SOCKS5-Scanner](https://github.com/arandomguyhere/Tools/tree/main/socks5-scanner)

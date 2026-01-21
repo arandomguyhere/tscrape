@@ -25,6 +25,8 @@ from .scraper import TelegramScraper
 from .storage import StorageManager
 from .config import Config
 from .proxy import ProxyManager, ProxyType
+from .discovery import ChannelDiscovery
+from .filters import MessageFilter, FilterMode, KeywordSet, create_filter_from_file
 
 console = Console()
 
@@ -375,6 +377,389 @@ def init(ctx):
     console.print(f"\n[green]Configuration saved to: {config_path}[/green]")
     console.print("\nYou can now run:")
     console.print(f"  [cyan]tscrape -c {config_path} scrape @channel[/cyan]")
+
+
+@cli.group()
+def discover():
+    """Channel discovery commands (snowballing)."""
+    pass
+
+
+@discover.command("snowball")
+@click.argument('channels', nargs=-1, required=True)
+@click.option('--depth', '-d', type=int, default=1, help='Discovery depth (1-3 recommended)')
+@click.option('--limit', '-n', type=int, default=500, help='Messages to scan per channel')
+@click.option('--max-channels', '-m', type=int, default=100, help='Maximum channels to discover')
+@click.option('--min-forwards', type=int, default=3, help='Minimum forwards to consider a channel')
+@click.option('--api-id', type=int, envvar='TELEGRAM_API_ID', help='Telegram API ID')
+@click.option('--api-hash', envvar='TELEGRAM_API_HASH', help='Telegram API Hash')
+@click.option('--output', '-o', type=click.Path(), help='Save discovered channels to file')
+@click.pass_context
+def discover_snowball(ctx, channels, depth, limit, max_channels, min_forwards, api_id, api_hash, output):
+    """
+    Discover related channels via forward analysis (snowballing).
+
+    Based on PLOS ONE methodology for network expansion.
+
+    Examples:
+
+        tscrape discover snowball @durov @telegram
+
+        tscrape discover snowball @mychannel --depth 2 --max-channels 50
+
+        tscrape discover snowball @seed1 @seed2 -o discovered.txt
+    """
+    config = ctx.obj['config']
+
+    api_id = api_id or config.api_id
+    api_hash = api_hash or config.api_hash
+
+    if not api_id or not api_hash:
+        console.print("[red]Error: API credentials required[/red]")
+        raise SystemExit(1)
+
+    asyncio.run(_discover_snowball(
+        api_id=api_id,
+        api_hash=api_hash,
+        channels=list(channels),
+        depth=depth,
+        limit=limit,
+        max_channels=max_channels,
+        min_forwards=min_forwards,
+        output=output,
+        config=config
+    ))
+
+
+async def _discover_snowball(
+    api_id: int,
+    api_hash: str,
+    channels: List[str],
+    depth: int,
+    limit: int,
+    max_channels: int,
+    min_forwards: int,
+    output: Optional[str],
+    config: Config
+):
+    """Internal snowball discovery implementation."""
+    console.print(Panel.fit(
+        f"[bold blue]Channel Discovery[/bold blue]\n\n"
+        f"Seed channels: {', '.join(channels)}\n"
+        f"Depth: {depth} | Max channels: {max_channels}",
+        title="Snowballing"
+    ))
+
+    async with TelegramScraper(
+        api_id=api_id,
+        api_hash=api_hash,
+        data_dir=config.data_dir,
+        config=config
+    ) as scraper:
+
+        discovery = ChannelDiscovery(scraper)
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+            transient=True
+        ) as progress:
+            task = progress.add_task("Discovering channels...", total=None)
+
+            discovered = await discovery.snowball(
+                seed_channels=channels,
+                depth=depth,
+                message_limit=limit,
+                max_channels=max_channels,
+                min_forward_count=min_forwards
+            )
+
+            progress.update(task, completed=True)
+
+        # Display results
+        table = Table(title=f"Discovered {len(discovered)} Channels")
+        table.add_column("Username/ID", style="cyan")
+        table.add_column("Title", style="green")
+        table.add_column("Members", style="yellow", justify="right")
+        table.add_column("Forwards", style="magenta", justify="right")
+        table.add_column("Depth", style="dim", justify="right")
+
+        for ch in sorted(discovered.values(), key=lambda x: x.forward_count, reverse=True)[:20]:
+            table.add_row(
+                ch.username or str(ch.id),
+                (ch.title[:30] + "...") if len(ch.title) > 30 else ch.title,
+                f"{ch.participants:,}" if ch.participants else "-",
+                str(ch.forward_count),
+                str(ch.depth)
+            )
+
+        console.print(table)
+
+        if len(discovered) > 20:
+            console.print(f"[dim]... and {len(discovered) - 20} more channels[/dim]")
+
+        # Save to file if requested
+        if output:
+            with open(output, 'w') as f:
+                for ch in discovered.values():
+                    line = ch.username or str(ch.id)
+                    f.write(f"{line}\n")
+            console.print(f"\n[green]Saved {len(discovered)} channels to {output}[/green]")
+
+        # Show network stats
+        console.print(f"\n[bold]Network Stats:[/bold]")
+        console.print(f"  Channels discovered: {len(discovered)}")
+        console.print(f"  Edges (forward links): {len(discovery._edges)}")
+
+
+@discover.command("network")
+@click.argument('channels', nargs=-1, required=True)
+@click.option('--depth', '-d', type=int, default=1, help='Discovery depth')
+@click.option('--limit', '-n', type=int, default=500, help='Messages to scan per channel')
+@click.option('--format', '-f', 'fmt', type=click.Choice(['graphml', 'gexf', 'both']),
+              default='graphml', help='Export format')
+@click.option('--output', '-o', type=click.Path(), help='Output file path (without extension)')
+@click.option('--api-id', type=int, envvar='TELEGRAM_API_ID', help='Telegram API ID')
+@click.option('--api-hash', envvar='TELEGRAM_API_HASH', help='Telegram API Hash')
+@click.pass_context
+def discover_network(ctx, channels, depth, limit, fmt, output, api_id, api_hash):
+    """
+    Build and export channel network graph.
+
+    Exports to GraphML or GEXF for visualization in Gephi.
+
+    Examples:
+
+        tscrape discover network @channel1 @channel2 --format graphml
+
+        tscrape discover network @seed -d 2 -f both -o my_network
+    """
+    config = ctx.obj['config']
+
+    api_id = api_id or config.api_id
+    api_hash = api_hash or config.api_hash
+
+    if not api_id or not api_hash:
+        console.print("[red]Error: API credentials required[/red]")
+        raise SystemExit(1)
+
+    asyncio.run(_discover_network(
+        api_id=api_id,
+        api_hash=api_hash,
+        channels=list(channels),
+        depth=depth,
+        limit=limit,
+        fmt=fmt,
+        output=output,
+        config=config
+    ))
+
+
+async def _discover_network(
+    api_id: int,
+    api_hash: str,
+    channels: List[str],
+    depth: int,
+    limit: int,
+    fmt: str,
+    output: Optional[str],
+    config: Config
+):
+    """Internal network export implementation."""
+    console.print(Panel.fit(
+        f"[bold blue]Network Graph Export[/bold blue]\n\n"
+        f"Building network from: {', '.join(channels)}",
+        title="Discovery"
+    ))
+
+    async with TelegramScraper(
+        api_id=api_id,
+        api_hash=api_hash,
+        data_dir=config.data_dir,
+        config=config
+    ) as scraper:
+
+        discovery = ChannelDiscovery(scraper)
+
+        with console.status("[cyan]Discovering channel network..."):
+            await discovery.snowball(
+                seed_channels=channels,
+                depth=depth,
+                message_limit=limit
+            )
+
+        # Export
+        output_base = Path(output) if output else Path(config.data_dir) / "network"
+
+        if fmt in ('graphml', 'both'):
+            path = discovery.export_graphml(output_base.with_suffix('.graphml'))
+            console.print(f"[green]GraphML exported to: {path}[/green]")
+
+        if fmt in ('gexf', 'both'):
+            path = discovery.export_gexf(output_base.with_suffix('.gexf'))
+            console.print(f"[green]GEXF exported to: {path}[/green]")
+
+        console.print(f"\n[bold]Network:[/bold] {len(discovery._discovered)} nodes, {len(discovery._edges)} edges")
+        console.print("[dim]Open in Gephi for visualization[/dim]")
+
+
+@cli.command()
+@click.argument('channel')
+@click.option('--keywords', '-k', multiple=True, help='Keywords to search for')
+@click.option('--keywords-file', type=click.Path(exists=True), help='Load keywords from file')
+@click.option('--regex', '-r', multiple=True, help='Regex patterns to match')
+@click.option('--exclude', '-e', multiple=True, help='Keywords to exclude')
+@click.option('--preset', type=click.Choice(['cti', 'crypto', 'viral']), help='Use predefined keyword set')
+@click.option('--min-views', type=int, help='Minimum view count')
+@click.option('--min-date', type=click.DateTime(), help='Only messages after this date')
+@click.option('--max-date', type=click.DateTime(), help='Only messages before this date')
+@click.option('--mode', type=click.Choice(['all', 'any']), default='any', help='Filter combination mode')
+@click.option('--output', '-o', type=click.Path(), help='Output file for filtered messages')
+@click.option('--format', '-f', 'fmt', type=click.Choice(['json', 'csv', 'parquet']),
+              default='json', help='Output format')
+@click.pass_context
+def filter(ctx, channel, keywords, keywords_file, regex, exclude, preset, min_views, min_date, max_date, mode, output, fmt):
+    """
+    Filter scraped messages by keywords and criteria.
+
+    Based on TelegramScrap paper methodology.
+
+    Examples:
+
+        tscrape filter mychannel --keywords hack --keywords exploit
+
+        tscrape filter mychannel --preset cti -o threats.json
+
+        tscrape filter mychannel --keywords-file keywords.txt --min-views 1000
+
+        tscrape filter mychannel --regex "CVE-\\d{4}-\\d+" -o cves.json
+    """
+    config = ctx.obj['config']
+    storage = StorageManager(Path(config.data_dir))
+
+    # Load messages
+    console.print(f"[cyan]Loading messages from {channel}...[/cyan]")
+    df = storage.load_messages(channel)
+
+    if df.empty:
+        console.print(f"[yellow]No data found for channel: {channel}[/yellow]")
+        return
+
+    console.print(f"[green]Loaded {len(df):,} messages[/green]")
+
+    # Build filter
+    if keywords_file:
+        msg_filter = create_filter_from_file(keywords_file)
+    elif preset:
+        if preset == 'cti':
+            msg_filter = KeywordSet.get_cti_filter()
+        elif preset == 'crypto':
+            msg_filter = KeywordSet.get_crypto_filter()
+        else:  # viral
+            msg_filter = KeywordSet.get_viral_filter(min_views or 10000)
+    else:
+        filter_mode = FilterMode.ALL if mode == 'all' else FilterMode.ANY
+        msg_filter = MessageFilter(
+            keywords=list(keywords) if keywords else None,
+            keywords_regex=list(regex) if regex else None,
+            exclude_keywords=list(exclude) if exclude else None,
+            min_views=min_views,
+            min_date=min_date,
+            max_date=max_date,
+            mode=filter_mode
+        )
+
+    # Convert DataFrame rows to minimal dict for filtering
+    from .models import ScrapedMessage
+    import json as json_lib
+
+    matched_rows = []
+    matched_keywords_all = []
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+        transient=True
+    ) as progress:
+        task = progress.add_task("Filtering messages...", total=len(df))
+
+        for idx, row in df.iterrows():
+            # Create minimal message for filtering
+            reactions = []
+            if 'reactions_json' in row and row['reactions_json']:
+                try:
+                    reactions = json_lib.loads(row['reactions_json'])
+                except:
+                    pass
+
+            msg = ScrapedMessage(
+                message_id=row.get('message_id', 0),
+                channel_id=row.get('channel_id', 0),
+                channel_name=channel,
+                date=row.get('date'),
+                text=row.get('text', '') or '',
+                raw_text=row.get('raw_text', '') or '',
+                views=row.get('views', 0) or 0,
+                forwards=row.get('forwards', 0) or 0,
+                reactions=reactions,
+                has_media=row.get('has_media', False),
+                media_type=row.get('media_type')
+            )
+
+            result = msg_filter.matches(msg)
+            if result.matched:
+                matched_rows.append(idx)
+                matched_keywords_all.extend(result.matched_keywords)
+
+            progress.update(task, advance=1)
+
+    # Filter DataFrame
+    filtered_df = df.loc[matched_rows]
+
+    # Show results
+    stats = msg_filter.get_stats()
+    console.print(f"\n[bold]Filter Results:[/bold]")
+    console.print(f"  Matched: [green]{stats['total_matched']:,}[/green] / {stats['total_checked']:,}")
+    console.print(f"  Match rate: {stats['match_rate']:.1%}")
+
+    if matched_keywords_all:
+        from collections import Counter
+        top_keywords = Counter(matched_keywords_all).most_common(10)
+        console.print(f"\n[bold]Top matched keywords:[/bold]")
+        for kw, count in top_keywords:
+            console.print(f"  {kw}: {count}")
+
+    # Export if requested
+    if output:
+        output_path = Path(output)
+        if fmt == 'json':
+            records = filtered_df.to_dict(orient='records')
+            import json as json_mod
+            for record in records:
+                for key, value in record.items():
+                    if hasattr(value, 'isoformat'):
+                        record[key] = value.isoformat()
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json_mod.dump(records, f, ensure_ascii=False, indent=2, default=str)
+        elif fmt == 'csv':
+            filtered_df.to_csv(output_path, index=False)
+        else:
+            filtered_df.to_parquet(output_path, index=False)
+
+        console.print(f"\n[green]Exported {len(filtered_df)} messages to {output_path}[/green]")
+    else:
+        # Show sample of matched messages
+        if not filtered_df.empty:
+            console.print(f"\n[bold]Sample matched messages:[/bold]")
+            for _, row in filtered_df.head(5).iterrows():
+                text = (row.get('text', '') or '')[:100]
+                if len(row.get('text', '') or '') > 100:
+                    text += "..."
+                console.print(f"  [dim]{str(row.get('date', ''))[:10]}[/dim] {text}")
 
 
 @cli.group()

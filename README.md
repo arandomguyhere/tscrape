@@ -6,6 +6,11 @@ A high-performance Telegram scraper combining best practices from:
 - [Telethon](https://github.com/LonamiWebs/Telethon) - FloodWait handling, session management
 - [Proxy-Hound](https://github.com/arandomguyhere/Proxy-Hound) & [SOCKS5-Scanner](https://github.com/arandomguyhere/Tools/tree/main/socks5-scanner) - Proxy rotation
 
+Informed by academic research:
+- [TelegramScrap (arXiv:2412.16786)](https://arxiv.org/abs/2412.16786) - Keyword filtering methodology
+- [CTI Dataset Construction (arXiv:2509.20943)](https://arxiv.org/abs/2509.20943) - Content classification
+- [PLOS ONE Narrative Analysis](https://journals.plos.org/plosone/) - Snowballing method for channel discovery
+
 ## Features
 
 | Feature | Description |
@@ -20,6 +25,9 @@ A high-performance Telegram scraper combining best practices from:
 | **Progress Tracking** | Real-time progress bars |
 | **Proxy Rotation** | Auto-load from Proxy-Hound/SOCKS5-Scanner |
 | **Health Tracking** | Auto-skip dead proxies |
+| **Channel Discovery** | Snowballing via forward analysis |
+| **Keyword Filtering** | Regex support, preset CTI/crypto filters |
+| **Network Export** | GraphML/GEXF for Gephi visualization |
 
 ## Installation
 
@@ -70,6 +78,12 @@ tscrape export channelname --format csv
 
 # View statistics
 tscrape stats channelname
+
+# Discover related channels (snowballing)
+tscrape discover snowball @seedchannel --depth 2
+
+# Filter messages by keywords
+tscrape filter channelname --preset cti -o threats.json
 ```
 
 ## Usage
@@ -212,6 +226,142 @@ async def main():
 3. **On failure**: Marks proxy as failed, tries another
 4. **Dead proxies**: After 3 failures with <20% success rate, proxy is skipped
 
+## Channel Discovery (Snowballing)
+
+Discover related channels by analyzing message forwards. Based on the PLOS ONE methodology for network expansion.
+
+### How It Works
+
+1. Start with seed channels
+2. Analyze messages for forwarded content
+3. Extract source channels from forwards
+4. Recursively discover channels at specified depth
+5. Track forward counts to identify influential sources
+
+### CLI Commands
+
+```bash
+# Discover channels from seeds
+tscrape discover snowball @channel1 @channel2
+
+# Deeper discovery (depth 2 = channels that forward to your discovered channels)
+tscrape discover snowball @seed --depth 2 --max-channels 100
+
+# Save discovered channels to file
+tscrape discover snowball @seed -o discovered_channels.txt
+
+# Build and export network graph
+tscrape discover network @seed --format graphml -o network
+
+# Export both GraphML and GEXF formats
+tscrape discover network @seed @seed2 --depth 2 -f both -o channel_network
+```
+
+### Python API
+
+```python
+from tscrape import TelegramScraper, ChannelDiscovery
+
+async def discover_network():
+    async with TelegramScraper(api_id=ID, api_hash=HASH) as scraper:
+        discovery = ChannelDiscovery(scraper)
+
+        # Discover related channels
+        channels = await discovery.snowball(
+            seed_channels=["@channel1", "@channel2"],
+            depth=2,
+            message_limit=1000,
+            max_channels=50
+        )
+
+        for ch in channels.values():
+            print(f"{ch.username}: {ch.forward_count} forwards")
+
+        # Export to Gephi format
+        discovery.export_graphml("network.graphml")
+        discovery.export_gexf("network.gexf")
+```
+
+### Network Visualization
+
+Export formats are compatible with:
+- **Gephi**: Open GraphML/GEXF files directly
+- **NetworkX**: Load GraphML for Python analysis
+- **Cytoscape**: Import GraphML for biological-style layouts
+
+## Keyword Filtering
+
+Filter scraped messages by keywords, patterns, and engagement metrics. Based on TelegramScrap paper methodology.
+
+### CLI Commands
+
+```bash
+# Filter by keywords
+tscrape filter channelname --keywords hack --keywords exploit
+
+# Use regex patterns
+tscrape filter channelname --regex "CVE-\d{4}-\d+" -o cves.json
+
+# Use preset filters
+tscrape filter channelname --preset cti -o threats.json   # Cyber threat intelligence
+tscrape filter channelname --preset crypto -o crypto.json  # Cryptocurrency
+tscrape filter channelname --preset viral                  # High-engagement posts
+
+# Load keywords from file
+tscrape filter channelname --keywords-file keywords.txt
+
+# Combine criteria
+tscrape filter channelname --keywords malware --min-views 1000 --mode all
+
+# Export filtered results
+tscrape filter channelname --preset cti -f csv -o filtered.csv
+```
+
+### Keyword File Format
+
+```text
+# Comments start with #
+malware
+ransomware
+exploit
+
+# Regex patterns wrapped in slashes
+/CVE-\d{4}-\d+/
+/bitcoin wallet: [a-zA-Z0-9]{26,35}/
+```
+
+### Preset Filters
+
+| Preset | Description |
+|--------|-------------|
+| `cti` | Cyber threat intelligence (malware, exploits, IOCs) |
+| `crypto` | Cryptocurrency (bitcoin, trading, wallets) |
+| `viral` | High-engagement posts (10K+ views by default) |
+
+### Python API
+
+```python
+from tscrape import MessageFilter, FilterMode, KeywordSet
+
+# Custom filter
+filter = MessageFilter(
+    keywords=["hack", "exploit", "vulnerability"],
+    keywords_regex=[r"CVE-\d{4}-\d+"],
+    exclude_keywords=["game", "movie"],
+    min_views=100,
+    mode=FilterMode.ANY  # Match any keyword (OR)
+)
+
+# Use preset
+cti_filter = KeywordSet.get_cti_filter()
+
+# Apply to messages
+for msg in messages:
+    result = filter.matches(msg)
+    if result.matched:
+        print(f"Matched: {result.matched_keywords}")
+```
+
 ## Architecture
 
 ```
@@ -221,12 +371,15 @@ tscrape/
 ├── storage.py        # Parquet + SQLite storage
 ├── media.py          # Parallel media downloader
 ├── proxy.py          # Proxy manager with rotation
+├── discovery.py      # Channel discovery (snowballing)
+├── filters.py        # Keyword filtering
 ├── models.py         # Data models (ScrapedMessage, etc.)
 ├── config.py         # Configuration management
 └── cli.py            # Command-line interface
 
 data/
 ├── tscrape_state.db  # SQLite state (checkpoints)
+├── network.graphml   # Channel network (optional)
 └── channelname/
     ├── messages_*.parquet  # Message data
     └── media/              # Downloaded media
@@ -336,3 +489,8 @@ Inspired by:
 Proxy support powered by:
 - [Proxy-Hound](https://github.com/arandomguyhere/Proxy-Hound)
 - [SOCKS5-Scanner](https://github.com/arandomguyhere/Tools/tree/main/socks5-scanner)
+
+Academic foundations:
+- TelegramScrap (arXiv:2412.16786) - Keyword filtering methodology
+- CTI Dataset Construction (arXiv:2509.20943) - Threat intelligence classification
+- PLOS ONE Narrative Analysis - Snowballing channel discovery

@@ -616,6 +616,13 @@ class BiasTracker:
 
             for row in cursor:
                 data = json.loads(row[0])
+
+                # Parse datetime strings back to datetime objects
+                if data.get('start_time_utc') and isinstance(data['start_time_utc'], str):
+                    data['start_time_utc'] = datetime.fromisoformat(data['start_time_utc'].replace('Z', '+00:00'))
+                if data.get('end_time_utc') and isinstance(data['end_time_utc'], str):
+                    data['end_time_utc'] = datetime.fromisoformat(data['end_time_utc'].replace('Z', '+00:00'))
+
                 run = ScrapeRunManifest(**{
                     k: v for k, v in data.items()
                     if k != 'runtime_stats'

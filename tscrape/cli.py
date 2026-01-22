@@ -27,6 +27,7 @@ from .config import Config
 from .proxy import ProxyManager, ProxyType
 from .discovery import ChannelDiscovery
 from .filters import MessageFilter, FilterMode, KeywordSet, create_filter_from_file
+from .backends import BackendType, WebHTMLBackend, BackendCapabilities
 
 console = Console()
 
@@ -81,12 +82,20 @@ def cli(ctx, config, data_dir, log_level):
 @click.option('--proxy/--no-proxy', default=False, help='Use proxy rotation')
 @click.option('--proxy-file', type=click.Path(exists=True), help='Load proxies from file')
 @click.option('--proxy-country', '-pc', multiple=True, help='Filter proxies by country code (e.g., US, DE)')
+@click.option('--backend', '-b', type=click.Choice(['telethon', 'web']), default='telethon',
+              help='Scraping backend: telethon (API, default) or web (HTML, no API)')
 @click.pass_context
-def scrape(ctx, channel, limit, media, resume, api_id, api_hash, proxy, proxy_file, proxy_country):
+def scrape(ctx, channel, limit, media, resume, api_id, api_hash, proxy, proxy_file, proxy_country, backend):
     """
     Scrape messages from a Telegram channel.
 
     CHANNEL can be a username (@channel) or ID (1234567890).
+
+    Backends:
+
+        telethon (default): Full API access, requires credentials
+
+        web: HTML scraping via t.me, no API needed (public channels only)
 
     Examples:
 
@@ -96,20 +105,30 @@ def scrape(ctx, channel, limit, media, resume, api_id, api_hash, proxy, proxy_fi
 
         tscrape scrape @mychannel --proxy
 
-        tscrape scrape @mychannel --proxy --proxy-country US --proxy-country DE
+        tscrape scrape @mychannel --backend web
 
         tscrape scrape 1234567890 --no-resume
     """
     config = ctx.obj['config']
 
-    # Get credentials
+    # Web backend doesn't need API credentials
+    if backend == 'web':
+        asyncio.run(_scrape_channel_web(
+            channel=channel,
+            limit=limit,
+            config=config
+        ))
+        return
+
+    # Telethon backend requires credentials
     api_id = api_id or config.api_id
     api_hash = api_hash or config.api_hash
 
     if not api_id or not api_hash:
-        console.print("[red]Error: API credentials required[/red]")
+        console.print("[red]Error: API credentials required for telethon backend[/red]")
         console.print("Set TELEGRAM_API_ID and TELEGRAM_API_HASH environment variables")
         console.print("Or use --api-id and --api-hash options")
+        console.print("\nAlternatively, use --backend web for public channels (no API needed)")
         console.print("\nGet credentials at: https://my.telegram.org")
         raise SystemExit(1)
 
@@ -238,6 +257,132 @@ async def _scrape_channel(
             summary += f"\n[dim]Proxy: {proxy_stats.get('current_proxy', 'N/A')}[/dim]"
 
         console.print(Panel.fit(summary, title="Complete"))
+
+
+async def _scrape_channel_web(
+    channel: str,
+    limit: Optional[int],
+    config: Config
+):
+    """Scrape channel using web HTML backend (no API required)."""
+    console.print(Panel.fit(
+        f"[bold blue]TScrape[/bold blue] - Web Scraping [green]{channel}[/green]\n\n"
+        f"[yellow]Note: Using HTML backend (no API)[/yellow]\n"
+        f"[dim]Public channels only, limited metadata[/dim]",
+        subtitle="Press Ctrl+C to stop"
+    ))
+
+    # Show capability warnings
+    caps = WebHTMLBackend(data_dir=Path(config.data_dir)).capabilities
+    limitations = caps.get_limitations()
+
+    if limitations:
+        console.print(f"\n[yellow]Limitations:[/yellow]")
+        for lim in limitations[:5]:  # Show top 5
+            console.print(f"  [dim]• {lim}[/dim]")
+        console.print()
+
+    async with WebHTMLBackend(data_dir=Path(config.data_dir)) as backend:
+
+        # Get channel info
+        try:
+            info = await backend.get_channel_info(channel)
+            if info:
+                console.print(f"[bold]Channel:[/bold] {info.get('title', channel)}")
+                if info.get('participants_count'):
+                    console.print(f"[bold]Members:[/bold] ~{info['participants_count']:,}")
+                console.print()
+        except Exception as e:
+            console.print(f"[yellow]Could not get channel info: {e}[/yellow]")
+
+        # Progress tracking
+        message_count = 0
+        storage = StorageManager(Path(config.data_dir), enable_bias_tracking=False)
+
+        # Normalize channel name for storage
+        channel_name = channel.lstrip("@")
+        storage.init_channel(0, channel_name)  # Use 0 as placeholder ID
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=console,
+            transient=True
+        ) as progress:
+
+            task = progress.add_task(
+                f"Web scraping {channel}...",
+                total=limit or 100
+            )
+
+            messages_batch = []
+
+            try:
+                async for item in backend.scrape_channel(channel, limit=limit):
+                    message_count += 1
+
+                    # Store as simplified format
+                    messages_batch.append({
+                        "message_id": item.message_id or message_count,
+                        "channel_name": channel_name,
+                        "date": item.timestamp,
+                        "text": item.text,
+                        "forward_from": item.forward_from,
+                        "has_media": item.has_media,
+                        "backend": item.backend,
+                        "scraped_at": item.scraped_at
+                    })
+
+                    # Update progress
+                    if limit:
+                        progress.update(task, completed=message_count)
+                    else:
+                        progress.update(task, advance=1, total=message_count + 100)
+
+                    # Batch save every 100 messages
+                    if len(messages_batch) >= 100:
+                        _save_web_batch(storage, channel_name, messages_batch)
+                        messages_batch = []
+
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Stopping...[/yellow]")
+
+            # Save remaining
+            if messages_batch:
+                _save_web_batch(storage, channel_name, messages_batch)
+
+        # Get bias disclosure
+        disclosure = backend.get_bias_disclosure()
+
+        # Print summary
+        summary = f"[green]Scraped {message_count:,} messages[/green]\n"
+        summary += f"Backend: [yellow]web (HTML)[/yellow]\n"
+        summary += f"Bias confidence: [yellow]{disclosure['bias_confidence']}[/yellow]\n"
+        summary += f"Data saved to: {config.data_dir}/{channel_name}/"
+
+        console.print(Panel.fit(summary, title="Complete"))
+
+        # Show disclaimer
+        console.print(f"\n[dim]{disclosure['disclaimer']}[/dim]")
+
+
+def _save_web_batch(storage: StorageManager, channel_name: str, batch: list):
+    """Save a batch of web-scraped messages."""
+    import pandas as pd
+    from datetime import datetime
+
+    channel_dir = storage.data_dir / channel_name
+    channel_dir.mkdir(parents=True, exist_ok=True)
+
+    df = pd.DataFrame(batch)
+
+    # Generate filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    parquet_path = channel_dir / f"web_messages_{timestamp}.parquet"
+
+    df.to_parquet(parquet_path, index=False)
 
 
 @cli.command()

@@ -1,6 +1,6 @@
 # TScrape - Modern Telegram Channel Scraper (2026)
 
-[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](https://github.com/arandomguyhere/tscrape)
+[![Version](https://img.shields.io/badge/version-1.4.0-blue.svg)](https://github.com/arandomguyhere/tscrape)
 [![Python](https://img.shields.io/badge/python-3.9+-green.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-orange.svg)](LICENSE)
 [![Telethon](https://img.shields.io/badge/telethon-MTProto-purple.svg)](https://github.com/LonamiWebs/Telethon)
@@ -22,6 +22,7 @@ Informed by academic research:
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [CLI Command Reference](#cli-command-reference)
+- [Backends](#backends)
 - [Usage](#usage)
 - [Proxy Support](#proxy-support)
 - [Channel Discovery](#channel-discovery-snowballing)
@@ -54,6 +55,7 @@ Informed by academic research:
 | **Network Export** | GraphML/GEXF for Gephi visualization |
 | **Bias Tracking** | Academic-grade gap/deletion detection |
 | **Run Manifests** | Reproducibility metadata for research |
+| **Pluggable Backends** | API (telethon) or web HTML (no API needed) |
 
 ## Installation
 
@@ -143,6 +145,113 @@ tscrape filter channelname --preset cti -o threats.json
 | `tscrape bias report channel` | Export bias report |
 | `tscrape bias history` | View scrape history |
 | `tscrape bias statement channel` | Generate methodology statement |
+
+## Backends
+
+TScrape supports pluggable backends for different scraping strategies:
+
+| Backend | Command | API Required | Use Case |
+|---------|---------|--------------|----------|
+| **telethon** (default) | `--backend telethon` | Yes | Full-fidelity archival research |
+| **web** | `--backend web` | No | OSINT monitoring, no account needed |
+
+### Telethon Backend (Default)
+
+Full API access via MTProto. Reference standard for research.
+
+```bash
+# Default - uses Telethon API
+tscrape scrape @channel
+
+# Explicit
+tscrape scrape @channel --backend telethon
+```
+
+**Capabilities:**
+- Public and private channels
+- Full message metadata (views, reactions, forwards)
+- Edit and deletion detection
+- Media downloads
+- Resume by message ID
+- Full bias tracking support
+
+### Web HTML Backend (No API)
+
+Scrapes public web interface at `t.me/s/channelname`. No Telegram account required.
+
+```bash
+# No API credentials needed
+tscrape scrape @channel --backend web
+
+# With limit
+tscrape scrape @channel --backend web --limit 500
+```
+
+**Use cases:**
+- No Telegram account available
+- Account risk mitigation
+- Quick OSINT monitoring
+- Free, no credentials
+
+**Limitations (important):**
+- Public channels only
+- Message IDs inferred (not authoritative)
+- No reactions, accurate views, or replies
+- No edit/deletion detection
+- No media downloads
+- Bias confidence: **low**
+
+### Backend Comparison
+
+| Capability | telethon | web |
+|------------|----------|-----|
+| Public channels | ✅ | ✅ |
+| Private channels | ✅ | ❌ |
+| Message text | ✅ | ✅ |
+| Views/reactions | ✅ | ❌ |
+| Edit detection | ✅ | ❌ |
+| Media download | ✅ | ❌ |
+| Resume by ID | ✅ | ❌ |
+| Bias confidence | high | low |
+| API required | Yes | No |
+
+### Python API
+
+```python
+from tscrape import TelethonBackend, WebHTMLBackend
+
+# Full API backend
+async with TelethonBackend(api_id=ID, api_hash=HASH) as backend:
+    async for item in backend.scrape_channel("@channel"):
+        print(item.text)
+
+# Web HTML backend (no API)
+async with WebHTMLBackend() as backend:
+    async for item in backend.scrape_channel("channel"):
+        print(item.text)
+
+    # Get bias disclosure for reports
+    disclosure = backend.get_bias_disclosure()
+    print(disclosure['disclaimer'])
+```
+
+### Bias Disclosure
+
+Web backend automatically includes bias disclosure:
+
+```json
+{
+  "backend": "web",
+  "bias_confidence": "low",
+  "known_limitations": [
+    "Public channels only",
+    "Message IDs inferred, not authoritative",
+    "Edits not observable",
+    "Reactions not captured"
+  ],
+  "disclaimer": "Data collected via HTML scraping..."
+}
+```
 
 ## Usage
 
@@ -558,7 +667,12 @@ tscrape/
 ├── bias.py           # Bias tracking & reproducibility
 ├── models.py         # Data models (ScrapedMessage, etc.)
 ├── config.py         # Configuration management
-└── cli.py            # Command-line interface
+├── cli.py            # Command-line interface
+└── backends/         # Pluggable scraping backends
+    ├── __init__.py
+    ├── base.py           # Abstract base class
+    ├── telethon_backend.py   # Full API (default)
+    └── web_backend.py    # HTML scraping (no API)
 
 data/
 ├── tscrape_state.db  # SQLite state (checkpoints, bias tracking)

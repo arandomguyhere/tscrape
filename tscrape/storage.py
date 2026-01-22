@@ -20,6 +20,7 @@ import pyarrow.parquet as pq
 import pandas as pd
 
 from .models import ScrapedMessage, ChannelInfo, ScrapeState
+from .bias import BiasTracker, BiasMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ class StorageManager:
     - JSON/CSV: Export formats
     """
 
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, enable_bias_tracking: bool = True):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -69,6 +70,13 @@ class StorageManager:
         # In-memory buffer for batch writes
         self._write_buffer: Dict[int, List[Dict]] = {}
         self._buffer_size = 1000
+
+        # Bias tracking for academic-grade data quality
+        self._bias_tracking_enabled = enable_bias_tracking
+        if enable_bias_tracking:
+            self.bias_tracker = BiasTracker(self.db_path)
+        else:
+            self.bias_tracker = None
 
     def _init_database(self) -> None:
         """Initialize SQLite database for state tracking."""
@@ -360,3 +368,61 @@ class StorageManager:
             "media_count": df['has_media'].sum(),
             "pinned_count": df['is_pinned'].sum()
         }
+
+    # ========== Bias Tracking Methods ==========
+
+    def get_bias_metrics(self, channel_id: int, channel_name: str) -> Optional[BiasMetrics]:
+        """
+        Get bias metrics for a channel.
+
+        Returns computed metrics including gap ratio, deletion rate, etc.
+        """
+        if not self.bias_tracker:
+            return None
+        return self.bias_tracker.compute_metrics(channel_id, channel_name)
+
+    def get_methodology_statement(self, channel_id: int, channel_name: str) -> Optional[str]:
+        """
+        Generate a methodology statement for academic papers.
+
+        Returns a formatted statement suitable for inclusion in research publications.
+        """
+        metrics = self.get_bias_metrics(channel_id, channel_name)
+        if metrics:
+            return metrics.get_methodology_statement()
+        return None
+
+    def export_bias_report(
+        self,
+        channel_id: int,
+        channel_name: str,
+        output_path: Optional[Path] = None
+    ) -> Optional[Path]:
+        """
+        Export a comprehensive bias report for a channel.
+
+        Args:
+            channel_id: Channel identifier
+            channel_name: Channel name
+            output_path: Output file path (default: data_dir/channel_name/bias_report.json)
+
+        Returns:
+            Path to generated report, or None if bias tracking disabled
+        """
+        if not self.bias_tracker:
+            return None
+
+        if output_path is None:
+            output_path = self.data_dir / channel_name / "bias_report.json"
+
+        return self.bias_tracker.export_bias_report(channel_id, channel_name, output_path)
+
+    def get_scrape_history(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Get recent scrape run history with manifests.
+
+        Returns list of run manifests for reproducibility tracking.
+        """
+        if not self.bias_tracker:
+            return []
+        return [r.to_dict() for r in self.bias_tracker.get_run_history(limit)]

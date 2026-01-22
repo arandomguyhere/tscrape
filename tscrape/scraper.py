@@ -72,6 +72,7 @@ class TelegramScraper:
         self._is_running = False
         self._current_proxy: Optional[ProxyInfo] = None
         self._proxy_rotation_on_flood = True
+        self._enable_bias_tracking = True
 
     async def connect(self, proxy: Optional[ProxyInfo] = None) -> None:
         """
@@ -130,7 +131,10 @@ class TelegramScraper:
 
             raise
 
-        self.storage = StorageManager(self.data_dir)
+        self.storage = StorageManager(
+            self.data_dir,
+            enable_bias_tracking=self._enable_bias_tracking
+        )
         self.media_downloader = MediaDownloader(
             self.client,
             self.data_dir,
@@ -212,6 +216,14 @@ class TelegramScraper:
         self._is_running = True
         self._messages_scraped = 0
 
+        # Start bias tracking run
+        if self.storage and self.storage.bias_tracker:
+            self.storage.bias_tracker.start_run(
+                channels=[str(channel)],
+                scrape_mode="incremental" if resume else "full",
+                message_limit=limit
+            )
+
         try:
             entity = await self.client.get_entity(channel)
             channel_id = entity.id
@@ -253,6 +265,15 @@ class TelegramScraper:
                         batch.append(scraped)
                         self._messages_scraped += 1
 
+                        # Record for bias tracking
+                        if self.storage and self.storage.bias_tracker:
+                            self.storage.bias_tracker.record_message(
+                                channel_id,
+                                message.id,
+                                text=message.text,
+                                check_edit=True
+                            )
+
                         # Download media if requested
                         if download_media and message.media:
                             await self.media_downloader.queue_download(
@@ -275,6 +296,9 @@ class TelegramScraper:
 
                 except Exception as e:
                     logger.error(f"Error processing message {message.id}: {e}")
+                    # Record error for bias tracking
+                    if self.storage and self.storage.bias_tracker:
+                        self.storage.bias_tracker.record_error()
                     continue
 
             # Save remaining batch
@@ -284,6 +308,21 @@ class TelegramScraper:
             # Wait for media downloads to complete
             if download_media:
                 await self.media_downloader.wait_completion()
+
+            # End bias tracking run
+            if self.storage and self.storage.bias_tracker:
+                run = self.storage.bias_tracker.end_run()
+                if run:
+                    logger.info(f"Scrape run {run.run_id[:8]} completed: "
+                               f"{run.messages_collected} messages, "
+                               f"{run.flood_waits} flood waits, "
+                               f"{run.errors_encountered} errors")
+
+                # Compute and log bias metrics
+                metrics = self.storage.get_bias_metrics(channel_id, channel_name)
+                if metrics:
+                    logger.info(f"Bias metrics: coverage={metrics.coverage_rate:.1%}, "
+                               f"gap_ratio={metrics.gap_ratio:.1%}")
 
             logger.info(f"Scrape complete. Total messages: {self._messages_scraped}")
 
@@ -298,6 +337,9 @@ class TelegramScraper:
             raise
         finally:
             self._is_running = False
+            # Ensure bias run is ended even on error
+            if self.storage and self.storage.bias_tracker:
+                self.storage.bias_tracker.end_run()
 
     async def _process_message(
         self,
@@ -386,6 +428,10 @@ class TelegramScraper:
         wait_time = error.seconds
         self._flood_wait_count += 1
 
+        # Record for bias tracking
+        if self.storage and self.storage.bias_tracker:
+            self.storage.bias_tracker.record_flood_wait()
+
         # Add extra backoff based on flood count
         extra_wait = min(self._flood_wait_count * 5, 60)
         total_wait = wait_time + extra_wait
@@ -404,6 +450,11 @@ class TelegramScraper:
             if new_proxy and new_proxy != self._current_proxy:
                 logger.info(f"Rotating to new proxy: {new_proxy.host}:{new_proxy.port}")
                 await self._reconnect_with_proxy(new_proxy)
+
+                # Record proxy rotation for bias tracking
+                if self.storage and self.storage.bias_tracker:
+                    self.storage.bias_tracker.record_proxy_rotation()
+
                 # Reduced wait after proxy rotation
                 total_wait = min(total_wait, 30)
 
@@ -477,3 +528,40 @@ class TelegramScraper:
         """Enable or disable proxy rotation on FloodWait."""
         self._proxy_rotation_on_flood = enabled
         logger.info(f"Proxy rotation on FloodWait: {'enabled' if enabled else 'disabled'}")
+
+    def set_bias_tracking(self, enabled: bool) -> None:
+        """Enable or disable bias tracking for academic-grade data quality."""
+        self._enable_bias_tracking = enabled
+        logger.info(f"Bias tracking: {'enabled' if enabled else 'disabled'}")
+
+    def get_bias_metrics(self, channel_id: int, channel_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Get bias metrics for a channel.
+
+        Returns computed metrics including gap ratio, deletion rate, coverage, etc.
+        """
+        if self.storage:
+            metrics = self.storage.get_bias_metrics(channel_id, channel_name)
+            if metrics:
+                return metrics.to_dict()
+        return None
+
+    def get_methodology_statement(self, channel_id: int, channel_name: str) -> Optional[str]:
+        """
+        Generate a methodology statement for academic papers.
+
+        Returns a formatted statement suitable for inclusion in research publications.
+        """
+        if self.storage:
+            return self.storage.get_methodology_statement(channel_id, channel_name)
+        return None
+
+    def export_bias_report(self, channel_id: int, channel_name: str, output_path: Optional[Path] = None) -> Optional[Path]:
+        """
+        Export a comprehensive bias report for a channel.
+
+        Returns path to generated report.
+        """
+        if self.storage:
+            return self.storage.export_bias_report(channel_id, channel_name, output_path)
+        return None

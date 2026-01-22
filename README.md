@@ -28,6 +28,8 @@ Informed by academic research:
 | **Channel Discovery** | Snowballing via forward analysis |
 | **Keyword Filtering** | Regex support, preset CTI/crypto filters |
 | **Network Export** | GraphML/GEXF for Gephi visualization |
+| **Bias Tracking** | Academic-grade gap/deletion detection |
+| **Run Manifests** | Reproducibility metadata for research |
 
 ## Installation
 
@@ -362,6 +364,130 @@ for msg in messages:
         print(f"Matched: {result.matched_keywords}")
 ```
 
+## Bias Tracking & Methodology
+
+TScrape implements academic-grade data quality tracking following computational social science and OSINT research standards. This enables transparent reporting of data collection limitations.
+
+### Why Bias Tracking?
+
+Telegram content is subject to:
+- **Post-hoc deletion** - Messages may be removed after collection
+- **Silent edits** - Content may change without notification
+- **Access restrictions** - Some messages may be inaccessible
+- **Sampling gaps** - Collection frequency affects completeness
+
+TScrape quantifies these biases rather than ignoring them.
+
+### Metrics Tracked
+
+| Metric | Description |
+|--------|-------------|
+| **Gap Ratio** | Missing message IDs / expected IDs |
+| **Deletion Rate** | Deleted messages / total observed |
+| **Coverage Rate** | Observed / expected messages |
+| **Edit Rate** | Edited messages / observed messages |
+| **Sampling Latency** | Time between message creation and capture |
+
+### CLI Commands
+
+```bash
+# View bias metrics for a channel
+tscrape bias metrics mychannel
+
+# Export comprehensive bias report (JSON)
+tscrape bias report mychannel -o report.json
+
+# View scrape run history
+tscrape bias history
+
+# Generate methodology statement for papers
+tscrape bias statement mychannel
+```
+
+### Scrape Run Manifests
+
+Each scrape generates a reproducibility manifest:
+
+```json
+{
+  "run_id": "550e8400-e29b-41d4-a716-446655440000",
+  "tool_version": "tscrape 1.3.0",
+  "telethon_version": "1.34.0",
+  "python_version": "3.11.5",
+  "start_time_utc": "2026-01-21T12:00:00Z",
+  "end_time_utc": "2026-01-21T14:30:00Z",
+  "channels": ["@channel1"],
+  "scrape_mode": "incremental",
+  "runtime_stats": {
+    "messages_collected": 15420,
+    "flood_waits": 3,
+    "errors_encountered": 2
+  }
+}
+```
+
+### Methodology Statement Generator
+
+TScrape generates academic-ready methodology statements:
+
+```bash
+$ tscrape bias statement mychannel
+
+Data collection for channel 'mychannel' occurred between 2026-01-15 and
+2026-01-21. Approximately 2.3% of message IDs within the observed range
+were unavailable at collection time, consistent with deletion or access
+restrictions. The confirmed deletion rate was 0.8%. Approximately 1.2%
+of collected messages showed evidence of post-publication editing.
+```
+
+### Python API
+
+```python
+from tscrape import TelegramScraper, BiasTracker, BiasMetrics
+
+async def scrape_with_tracking():
+    async with TelegramScraper(api_id=ID, api_hash=HASH) as scraper:
+        # Scraping automatically tracks bias
+        async for msg in scraper.scrape_channel("@channel"):
+            pass
+
+        # Get bias metrics
+        metrics = scraper.get_bias_metrics(channel_id, "channel")
+        print(f"Coverage: {metrics['coverage']['coverage_rate']:.1%}")
+        print(f"Gap ratio: {metrics['coverage']['gap_ratio']:.1%}")
+
+        # Generate methodology statement
+        statement = scraper.get_methodology_statement(channel_id, "channel")
+        print(statement)
+
+        # Export full report
+        scraper.export_bias_report(channel_id, "channel", "bias_report.json")
+```
+
+### Schema Details
+
+**Message Continuity Table** - Tracks expected vs observed messages:
+```sql
+message_continuity (
+    channel_id, expected_msg_id, observed,
+    first_seen_ts, last_checked_ts, status
+)
+-- status: observed | deleted | inaccessible | unknown | edited
+```
+
+**Message Status History** - Tracks changes over time:
+```sql
+message_status_history (
+    channel_id, message_id, observed_ts,
+    status, text_checksum, text_length
+)
+```
+
+**Scrape Runs** - Reproducibility manifests:
+```sql
+scrape_runs (run_id, manifest_json, created_at)
+```
+
 ## Architecture
 
 ```
@@ -373,15 +499,18 @@ tscrape/
 ├── proxy.py          # Proxy manager with rotation
 ├── discovery.py      # Channel discovery (snowballing)
 ├── filters.py        # Keyword filtering
+├── bias.py           # Bias tracking & reproducibility
 ├── models.py         # Data models (ScrapedMessage, etc.)
 ├── config.py         # Configuration management
 └── cli.py            # Command-line interface
 
 data/
-├── tscrape_state.db  # SQLite state (checkpoints)
+├── tscrape_state.db  # SQLite state (checkpoints, bias tracking)
+├── manifest_*.json   # Scrape run manifests
 ├── network.graphml   # Channel network (optional)
 └── channelname/
     ├── messages_*.parquet  # Message data
+    ├── bias_report.json    # Bias report (optional)
     └── media/              # Downloaded media
 ```
 
@@ -494,3 +623,5 @@ Academic foundations:
 - TelegramScrap (arXiv:2412.16786) - Keyword filtering methodology
 - CTI Dataset Construction (arXiv:2509.20943) - Threat intelligence classification
 - PLOS ONE Narrative Analysis - Snowballing channel discovery
+- Computational social science best practices - Bias tracking schema
+- Digital trace data collection guidelines - Reproducibility standards

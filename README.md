@@ -1,5 +1,10 @@
 # TScrape - Modern Telegram Channel Scraper (2026)
 
+[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](https://github.com/arandomguyhere/tscrape)
+[![Python](https://img.shields.io/badge/python-3.9+-green.svg)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-orange.svg)](LICENSE)
+[![Telethon](https://img.shields.io/badge/telethon-MTProto-purple.svg)](https://github.com/LonamiWebs/Telethon)
+
 A high-performance Telegram scraper combining best practices from:
 - [unnohwn/telegram-scraper](https://github.com/unnohwn/telegram-scraper) - Resume support, parallel media
 - [ergoncugler/web-scraping-telegram](https://github.com/ergoncugler/web-scraping-telegram) - Parquet storage, analytics
@@ -10,6 +15,25 @@ Informed by academic research:
 - [TelegramScrap (arXiv:2412.16786)](https://arxiv.org/abs/2412.16786) - Keyword filtering methodology
 - [CTI Dataset Construction (arXiv:2509.20943)](https://arxiv.org/abs/2509.20943) - Content classification
 - [PLOS ONE Narrative Analysis](https://journals.plos.org/plosone/) - Snowballing method for channel discovery
+
+## Table of Contents
+
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [CLI Command Reference](#cli-command-reference)
+- [Usage](#usage)
+- [Proxy Support](#proxy-support)
+- [Channel Discovery](#channel-discovery-snowballing)
+- [Keyword Filtering](#keyword-filtering)
+- [Bias Tracking & Methodology](#bias-tracking--methodology)
+- [Architecture](#architecture)
+- [Configuration](#configuration)
+- [Best Practices](#best-practices)
+- [Data Schema](#data-schema)
+- [Troubleshooting](#troubleshooting)
+- [License](#license)
+- [Acknowledgments](#acknowledgments)
 
 ## Features
 
@@ -35,7 +59,7 @@ Informed by academic research:
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-repo/tscrape.git
+git clone https://github.com/arandomguyhere/tscrape.git
 cd tscrape
 
 # Install dependencies
@@ -87,6 +111,38 @@ tscrape discover snowball @seedchannel --depth 2
 # Filter messages by keywords
 tscrape filter channelname --preset cti -o threats.json
 ```
+
+## CLI Command Reference
+
+| Command | Description |
+|---------|-------------|
+| `tscrape scrape @channel` | Scrape messages from a channel |
+| `tscrape scrape @channel --media` | Scrape with media downloads |
+| `tscrape scrape @channel --limit N` | Limit to N messages |
+| `tscrape scrape @channel --proxy` | Use proxy rotation |
+| `tscrape channels` | List accessible channels |
+| `tscrape export channel --format json` | Export to JSON |
+| `tscrape export channel --format csv` | Export to CSV |
+| `tscrape export channel --format parquet` | Export to Parquet |
+| `tscrape stats channel` | View channel statistics |
+| `tscrape init` | Create config interactively |
+| **Discovery** | |
+| `tscrape discover snowball @ch` | Discover related channels |
+| `tscrape discover snowball @ch --depth 2` | Deeper discovery |
+| `tscrape discover network @ch --format graphml` | Export network graph |
+| **Filtering** | |
+| `tscrape filter channel --keywords X` | Filter by keywords |
+| `tscrape filter channel --preset cti` | Use CTI preset |
+| `tscrape filter channel --regex "pattern"` | Filter by regex |
+| **Proxy** | |
+| `tscrape proxy load` | Load proxy pool |
+| `tscrape proxy test -f file.txt` | Test proxies |
+| `tscrape proxy sources` | List proxy sources |
+| **Bias Tracking** | |
+| `tscrape bias metrics channel` | View bias metrics |
+| `tscrape bias report channel` | Export bias report |
+| `tscrape bias history` | View scrape history |
+| `tscrape bias statement channel` | Generate methodology statement |
 
 ## Usage
 

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tscrape"
-version = "1.3.0"
-description = "Modern Telegram Channel Scraper with bias tracking, discovery, filtering, and proxy rotation (2026)"
+version = "1.4.0"
+description = "Modern Telegram Channel Scraper with pluggable backends, bias tracking, discovery, filtering, and proxy rotation (2026)"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"

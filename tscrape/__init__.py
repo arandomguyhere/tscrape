@@ -21,9 +21,10 @@ Features:
 - Network graph export (GraphML/GEXF)
 - Academic-grade bias tracking (gap detection, deletion tracking)
 - Scrape run manifests for reproducibility
+- Pluggable backends (API or web HTML scraping)
 """
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 __author__ = "TScrape"
 
 from .scraper import TelegramScraper
@@ -33,6 +34,13 @@ from .proxy import ProxyManager, ProxyInfo, ProxyType
 from .discovery import ChannelDiscovery, DiscoveredChannel, ChannelEdge
 from .filters import MessageFilter, FilterMode, FilterResult, KeywordSet
 from .bias import BiasTracker, BiasMetrics, ScrapeRunManifest, MessageStatus
+from .backends import (
+    ScrapeBackend,
+    BackendType,
+    BackendCapabilities,
+    TelethonBackend,
+    WebHTMLBackend
+)
 
 __all__ = [
     "TelegramScraper",
@@ -51,5 +59,10 @@ __all__ = [
     "BiasTracker",
     "BiasMetrics",
     "ScrapeRunManifest",
-    "MessageStatus"
+    "MessageStatus",
+    "ScrapeBackend",
+    "BackendType",
+    "BackendCapabilities",
+    "TelethonBackend",
+    "WebHTMLBackend"
 ]
